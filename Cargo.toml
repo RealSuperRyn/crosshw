@@ -1,0 +1,8 @@
+[package]
+name = "crosshw"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+x86_64 = "0.15.1"
+

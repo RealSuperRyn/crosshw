@@ -1,0 +1,117 @@
+//We use 64-bit pointers here
+#[repr(align(4096))]
+//pub struct PageTable ([u64; 512]);
+//impl PageTable {
+//	
+//}
+#[repr(align(4096))]
+pub struct PageDirectory ([u64; 512]);
+impl PageDirectory {
+	//A reason why all of these are unsafe is because the caller must ensure these are initialized.
+	pub unsafe fn set_flags(&mut self, flags: u16, start: usize, end: usize) {
+		//Unsafe because caller must ensure that setting new flags doesn't break any pages in use.
+
+		//Note: You should use the debug build mode when testing low level unsafe code such as this. This allows the below asserts
+		//to compile. The reason debug_assert!() is used instead of assert!() is due to the code that assert!() adds. Basically,
+		//it always being there would be a performance bottleneck, when this system is trying to be resource-efficient.
+		debug_assert!(start <= end, "Start index should be below or equal to end index!");
+		debug_assert!(start < 512, "Start set as above maximum value!"); //If code tries to index past the 512th entry, explode violently, therefore alerting the dev.
+		debug_assert!(end < 512, "End set as above maximum value! (511)");
+		for i in start..end {
+			self.0[i] &= !4095; //Removes all flags from entry
+			self.0[i] |= flags as u64; //Adds the flags to set to the entry
+		}
+	}
+	pub unsafe fn or_flags(&mut self, flags: u16, start: usize, end: usize) {
+		//Unsafe because the caller must ensure the added flags don't break pages in use.
+		debug_assert!(start <= end, "Start index should be below or equal to end index!");
+		debug_assert!(start < 512, "Start set as above maximum value!");
+		debug_assert!(end < 512, "End set as above maximum value! (511)");
+		for i in start..end {
+			self.0[i] |= flags as u64; 
+		}
+	}
+	pub unsafe fn insert_page_table(&mut self, idx: usize, addr: u64) {
+		//Unsafe because the caller must ensure that this call doesn't overwrite a page table entry in use.
+
+		//This will check that the address given is page-aligned. If not, the code will explode, alerting the dev to the issue.
+		//Below code is equivalent to assert!(addr % 4096 == 0), but uses hack from the following link:
+		//http://www-graphics.stanford.edu/~seander/bithacks.html#ModulusDivisionEasy
+		debug_assert!((addr & ((1 << 11) - 1) as u64) == 0);
+
+		debug_assert!(idx < 512);
+		let flags = self.0[idx] & 4095; //4095 in binary is 0b111111111111.
+		self.0[idx] = addr | flags;
+	}
+	pub fn check_flag(&self, idx: usize, flag: u16) -> bool {
+		//Doesn't change anything, so it's the only safe function here.
+		//If the flag variable has a flag above "1 << 11", it'll be zeroed due to address filtering (self.0[idx] & 4095)
+		debug_assert!(idx < 512); //"yrou'e for loop is broken you fool"
+		if (self.0[idx]&4095)&flag as u64 > 0 {true} else {false}
+	}
+}
+
+//The below is a 4-level page table for 4KiB pages.
+pub struct PageHierarchy {
+	root: *mut u8, //Will be casted to a PageDirectory
+}
+impl PageHierarchy {
+	pub unsafe fn new<T: FrameAllocator<Size4KiB>>(frame_alloc: &mut T) { //-> PageHierarchy {
+		//Unsafe because of:
+		//A - there being a bajillion unsafe blocks in the function,
+		//B - caller has to ensure that the FrameAllocator doesn't overwrite anything, 
+		let root = unsafe { frame_alloc.allocate_frame().unwrap().start_address().as_u64() as *mut u8 };
+		let mut root_table: &mut PageDirectory = unsafe { &mut *(root as *mut PageDirectory) };
+		unsafe {
+			root_table.set_flags(0, 0, 511); //Zeroes all flags
+			root_table.insert_page_table(0, frame_alloc.allocate_frame().unwrap().start_address().as_u64()); //Creates the first entry of the 2nd layer of page directories
+			//The below complete disaster wrangles a pointer to a PageDirectory out of the root table's first entry.
+			//let second_table: &mut PageDirectory = unsafe { &mut *(((root_table.0[0]&!4095) as *mut u8) as *mut PageDirectory) }
+			//root_table.set_flags(0, 0, 511);
+			//root_table.insert_page_table(0, frame_alloc.allocate_frame().unwrap().start_address().as_u64());
+		}
+	}
+	pub unsafe fn init_page_with_physptr<T: FrameAllocator<Size4KiB>>(&mut self, paddr: u64, vaddr: u64, frame_alloc: &mut T) {
+		//This function initializes a page at a virtual address using a physical address.
+		//Function is unsafe because the physical address shouldn't be in use, and additionally,
+		//the frame allocator might allocate a frame using the same physical address if you're not careful.
+		//Physical address should be aligned, but if it isn't, it'll round down to the nearest alignment.
+		let mut level1: &mut PageDirectory = unsafe { &mut *(self.root as *mut PageDirectory) };
+		let level1_idx = (vaddr&(511<<39)) as usize;
+		let level2_idx = (vaddr&(511<<30)) as usize;
+		let level3_idx = (vaddr&(511<<21)) as usize;
+		let page_idx = (vaddr&(511<<12)) as usize;
+		//Level 2
+		let mut level2: &mut PageDirectory = if !level1.check_flag(level1_idx, PRESENT) 
+		{
+			unsafe {
+				level1.insert_page_table(level1_idx, frame_alloc.allocate_frame().unwrap().start_address().as_u64());
+				&mut *((level1.0[level1_idx as usize] as *mut u8) as *mut PageDirectory) 
+			}
+		}
+		else
+		{unsafe { &mut *((level1.0[level1_idx as usize] as *mut u8) as *mut PageDirectory) }};
+		//Level 3
+		let mut level3: &mut PageDirectory = if !level2.check_flag(level2_idx, PRESENT) 
+		{
+			unsafe {
+				level2.insert_page_table(level2_idx, frame_alloc.allocate_frame().unwrap().start_address().as_u64());
+				&mut *((level2.0[level2_idx as usize] as *mut u8) as *mut PageDirectory) 
+			}
+		}
+		else
+		{unsafe { &mut *((level2.0[level2_idx as usize] as *mut u8) as *mut PageDirectory) }};
+		//Level 4 (page tables)
+		let mut page_table: &mut PageDirectory = if !level3.check_flag(level3_idx, PRESENT) 
+		{
+			unsafe {
+				level3.insert_page_table(level3_idx, frame_alloc.allocate_frame().unwrap().start_address().as_u64());
+				&mut *((level3.0[level3_idx as usize] as *mut u8) as *mut PageDirectory) 
+			}
+		}
+		else
+		{unsafe { &mut *((level3.0[level3_idx as usize] as *mut u8) as *mut PageDirectory) }};
+
+		page_table.insert_page_table(page_idx, frame_alloc.allocate_frame().unwrap().start_address().as_u64());
+	}
+}
