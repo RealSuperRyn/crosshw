@@ -97,7 +97,6 @@ impl PageHierarchy {
         let mut hierarchy = PageHierarchy {
             root: fralloc.allocate_frame().unwrap().start_address().as_u64() as *mut u8,
         };
-        loop {}
         let zerotable = &mut *(hierarchy.get_table_at_vaddr(fralloc, 0) as *mut PageTable);
         zerotable[0].init_page(fralloc);
         unsafe { zerotable[0].zero(0) };

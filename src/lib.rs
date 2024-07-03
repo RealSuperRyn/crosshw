@@ -1,6 +1,7 @@
 #![feature(sync_unsafe_cell)]
 #![no_std]
 #![allow(dead_code, unused_imports)]
+pub mod boot;
 pub mod elf;
 pub mod logging;
 pub mod memory;
