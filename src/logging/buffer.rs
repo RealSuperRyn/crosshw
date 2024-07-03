@@ -1,3 +1,4 @@
+/*
 use core::cell::SyncUnsafeCell;
 extern crate std;
 use std::io::Write;
@@ -25,3 +26,4 @@ impl<T: Copy> LogBuffer<T> {
     }
     pub fn flush() {}
 }
+*/
